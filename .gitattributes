@@ -1,0 +1,6 @@
+# Obligar a GitHub a incluir YAML en las estadísticas
+*.yml linguist-detectable=true
+*.yaml linguist-detectable=true
+
+# Obligar a GitHub a incluir el Vagrantfile como Ruby
+Vagrantfile linguist-language=Ruby linguist-detectable=true
