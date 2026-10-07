@@ -137,4 +137,6 @@ Esto se materializa en:
 
 ## Licencia / Uso Académico
 
+Este proyecto está publicado bajo la [Licencia MIT](LICENSE). Eres libre de utilizar, copiar, modificar y distribuir este código, con la única condición de incluir el aviso de derechos de autor y licencia original.
+
 Proyecto desarrollado de forma independiente como Trabajo de Fin de Grado. MinIO se despliega en su edición **Community / bare-metal** sin necesidad de poseer licencias comerciales.
