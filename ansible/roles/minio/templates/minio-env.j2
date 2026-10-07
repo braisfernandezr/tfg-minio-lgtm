@@ -1,0 +1,12 @@
+# MinIO local volumes (distributed mode)
+MINIO_VOLUMES="{{ minio_volumes }}"
+
+# MinIO server command-line options
+MINIO_OPTS="--console-address :{{ minio_console_port }}"
+
+# Root credentials
+MINIO_ROOT_USER={{ minio_root_user }}
+MINIO_ROOT_PASSWORD={{ minio_root_password }}
+
+# Site name
+MINIO_SITE_NAME={{ inventory_hostname }}

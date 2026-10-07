@@ -1,0 +1,17 @@
+---
+# Variables globales para todos los hosts
+
+# Versión de Docker a instalar
+docker_version: "latest"
+
+# Usuario que ejecutará contenedores Docker
+docker_user: vagrant
+
+# Paquetes básicos comunes
+common_packages:
+  - git
+  - curl
+  - wget
+  - vim
+  - net-tools
+  - htop

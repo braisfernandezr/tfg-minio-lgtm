@@ -1,0 +1,351 @@
+---
+# ========================================
+# Role: lgtm_stack
+#
+# Responsabilidad: desplegar el stack LGTM completo
+# (Loki, Grafana, Tempo, Mimir) en minio-1 mediante un
+# docker-compose.yml plantillado (templates/
+# docker-compose.yml.j2) y "docker compose up", usando
+# MinIO como backend S3 para los tres componentes de
+# almacenamiento.
+#
+# Requiere que Docker ya esté instalado (role "docker"),
+# que MinIO ya esté desplegado (role "minio", para poder
+# crear los buckets) y que el firewall ya esté
+# neutralizado en Rocky/Alma (role "firewall").
+#
+# Se mantienen los 4 componentes en un único role (en vez
+# de 4 roles separados: loki/tempo/mimir/grafana) porque
+# están fuertemente acoplados entre sí (misma red Docker,
+# el datasources.yaml de Grafana referencia a los otros
+# tres por nombre de contenedor) y solo se despliegan
+# juntos, en el mismo host (minio-1); separarlos no
+# aportaría reutilización real, solo más ceremonia.
+# ========================================
+
+# ========================================
+# Información
+# ========================================
+- name: Mostrar información
+  debug:
+    msg: "Desplegando stack LGTM en {{ inventory_hostname }} ({{ ansible_host }})"
+
+# ========================================
+# Verificar Docker
+# ========================================
+- name: Verificar Docker
+  command: docker --version
+  register: docker_version
+  changed_when: false
+  failed_when: docker_version.rc != 0
+
+- name: Mostrar versión Docker
+  debug:
+    msg: "{{ docker_version.stdout }}"
+
+# ========================================
+# Instalar MinIO Client
+# ========================================
+# FIX: se instala directamente en /usr/bin (no en
+# /usr/local/bin) porque en Rocky/Alma el "secure_path"
+# por defecto de sudo (/etc/sudoers) no incluye
+# /usr/local/bin, y las tareas "shell" posteriores que
+# invocan "mc" corren con become (sudo) y darían
+# "mc: orden no encontrada" (rc 127) aunque el binario
+# esté instalado y sea ejecutable. Mismo problema que
+# ya se dio con el binario de MinIO en el role "minio".
+- name: Instalar MinIO Client (mc)
+  get_url:
+    # dl.min.io tampoco sirve ya el cliente: la ruta
+    # /client/mc/release/linux-amd64/mc devuelve 410 Gone desde que
+    # MinIO retiro la edicion Community. Se descarga el binario del
+    # release de GitHub de minio/mc, que si sigue publicado, fijando
+    # una version concreta (RELEASE.2025-08-13T08-35-41Z) y su
+    # checksum en lugar de depender de un "latest" movil.
+    url: https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z
+    dest: /usr/bin/mc
+    mode: '0755'
+    checksum: sha256:01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+
+# ========================================
+# Configurar alias MinIO
+# ========================================
+- name: Configurar alias MinIO
+  shell: |
+    mc alias set local http://{{ minio_endpoint }} {{ minio_access_key }} {{ minio_secret_key }} --insecure
+  changed_when: false
+
+# ========================================
+# Crear buckets
+# ========================================
+- name: Crear buckets LGTM
+  shell: |
+    mc mb local/{{ item }} --ignore-existing --insecure
+  loop:
+    - "{{ loki_bucket }}"
+    - "{{ tempo_bucket }}"
+    - "{{ mimir_blocks_bucket }}"
+    - "{{ mimir_ruler_bucket }}"
+    - "{{ mimir_alertmanager_bucket }}"
+  changed_when: false
+
+- name: Verificar buckets
+  shell: |
+    mc ls local/ --insecure
+  register: buckets_list
+  changed_when: false
+
+- name: Mostrar buckets
+  debug:
+    msg: "{{ buckets_list.stdout_lines }}"
+
+# ========================================
+# Crear directorios
+# ========================================
+- name: Crear directorios de configuración
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ lgtm_config_dir }}/loki"
+    - "{{ lgtm_config_dir }}/tempo"
+    - "{{ lgtm_config_dir }}/mimir"
+    - "{{ lgtm_config_dir }}/grafana"
+    - "{{ lgtm_data_dir }}/grafana"
+
+- name: Crear directorio temporal para Mimir
+  file:
+    path: /tmp/mimir
+    state: directory
+    mode: '0755'
+
+# ========================================
+# Permisos Grafana (UID 472)
+# ========================================
+- name: Configurar permisos Grafana
+  file:
+    path: "{{ lgtm_data_dir }}/grafana"
+    state: directory
+    owner: 472
+    group: 472
+    mode: '0755'
+
+# ========================================
+# Configuración Loki
+# ========================================
+- name: Configuración Loki
+  template:
+    src: loki.yaml.j2
+    dest: "{{ lgtm_config_dir }}/loki/loki.yaml"
+    mode: '0644'
+
+# ========================================
+# Configuración Tempo
+# FIX: Añadidos receivers Jaeger para la
+# app TNS que usa JAEGER_ENDPOINT
+# ========================================
+- name: Configuración Tempo
+  template:
+    src: tempo.yaml.j2
+    dest: "{{ lgtm_config_dir }}/tempo/tempo.yaml"
+    mode: '0644'
+
+# ========================================
+# Configuración Mimir
+# FIX: Añadida region en todos los bloques S3
+# ========================================
+- name: Configuración Mimir
+  template:
+    src: mimir.yaml.j2
+    dest: "{{ lgtm_config_dir }}/mimir/mimir.yaml"
+    mode: '0644'
+
+# ========================================
+# Datasources Grafana
+# ========================================
+- name: Configurar datasources Grafana
+  template:
+    src: datasources.yaml.j2
+    dest: "{{ lgtm_config_dir }}/grafana/datasources.yaml"
+    mode: '0644'
+
+# ========================================
+# Dashboards Grafana (provisionados automáticamente
+# desde grafana.com, sin pasos manuales de import)
+# ========================================
+- name: Crear directorio de dashboards Grafana
+  file:
+    path: "{{ lgtm_config_dir }}/grafana/dashboards"
+    state: directory
+    mode: '0755'
+
+- name: Configurar proveedor de dashboards Grafana
+  template:
+    src: dashboards-provider.yaml.j2
+    dest: "{{ lgtm_config_dir }}/grafana/dashboards-provider.yaml"
+    mode: '0644'
+
+# Los dashboards solo se descargan si el .json no existe aún.
+# Sin esta guarda el role no era idempotente: get_url, aunque el
+# fichero exista, vuelve a descargar el remoto si el servidor no
+# contesta 304 y lo compara por checksum — y como la tarea
+# "Apuntar..." de abajo parchea el JSON local (${DS_PROMETHEUS} ->
+# mimir), el local nunca coincide con el remoto y cada ejecución
+# re-descargaba y re-parcheaba (changed perpetuo). De paso, el
+# entorno queda reproducible: una revisión nueva publicada upstream
+# no cambia el lab por su cuenta. Para actualizar un dashboard:
+# borrar su .json y re-ejecutar el role.
+- name: Comprobar qué dashboards están ya descargados
+  stat:
+    path: "{{ lgtm_config_dir }}/grafana/dashboards/{{ item }}.json"
+  loop: "{{ (grafana_dashboard_ids | map('string') | list) + (grafana_dashboard_urls | map(attribute='name') | list) }}"
+  register: dashboards_stat
+
+- name: Listar dashboards ya presentes
+  set_fact:
+    dashboards_presentes: "{{ dashboards_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+
+- name: Descargar dashboards desde grafana.com
+  get_url:
+    url: "https://grafana.com/api/dashboards/{{ item }}/revisions/latest/download"
+    dest: "{{ lgtm_config_dir }}/grafana/dashboards/{{ item }}.json"
+    mode: '0644'
+  loop: "{{ grafana_dashboard_ids }}"
+  when: (item | string) not in dashboards_presentes
+
+- name: Descargar dashboards desde URL directa
+  get_url:
+    url: "{{ item.url }}"
+    dest: "{{ lgtm_config_dir }}/grafana/dashboards/{{ item.name }}.json"
+    mode: '0644'
+  loop: "{{ grafana_dashboard_urls }}"
+  when: item.name not in dashboards_presentes
+
+- name: Apuntar los dashboards descargados al datasource Mimir
+  # Los JSON traen el datasource como variable de plantilla
+  # (${DS_PROMETHEUS}) porque están pensados para el import manual
+  # desde la UI; el provisioning por fichero no resuelve esa
+  # plantilla, así que hay que sustituirla por el uid fijo del
+  # datasource "Mimir" definido en datasources.yaml.j2.
+  replace:
+    path: "{{ lgtm_config_dir }}/grafana/dashboards/{{ item }}.json"
+    regexp: '\$\{DS_PROMETHEUS\}'
+    replace: 'mimir'
+  loop: "{{ (grafana_dashboard_ids | map('string') | list) + (grafana_dashboard_urls | map(attribute='name') | list) }}"
+
+# ========================================
+# Migración: eliminar restos de despliegues
+# anteriores hechos con docker_container
+# (sin compose). Solo actúa sobre contenedores
+# y red SIN etiquetas de compose; los gestionados
+# por compose los reconcilia "docker compose up".
+# ========================================
+- name: Eliminar contenedores y red de despliegues previos sin compose
+  shell: |
+    for c in loki tempo mimir grafana; do
+      if docker inspect "$c" >/dev/null 2>&1 && \
+         [ -z "$(docker inspect -f '{% raw %}{{ index .Config.Labels "com.docker.compose.project" }}{% endraw %}' "$c")" ]; then
+        docker rm -f "$c" >/dev/null && echo "eliminado contenedor $c"
+      fi
+    done
+    if docker network inspect lgtm-network >/dev/null 2>&1 && \
+       [ -z "$(docker network inspect -f '{% raw %}{{ index .Labels "com.docker.compose.network" }}{% endraw %}' lgtm-network)" ]; then
+      docker network rm lgtm-network >/dev/null && echo "eliminada red lgtm-network"
+    fi
+  register: legacy_cleanup
+  changed_when: legacy_cleanup.stdout != ""
+
+# ========================================
+# Docker Compose del stack
+#
+# Se usa la CLI "docker compose" (plugin instalado
+# por el role "docker") en vez de los módulos
+# docker_image/docker_container: no depende del SDK
+# Python de Docker en el host destino, así que este
+# role queda al margen del pin requests==2.31.0
+# necesario en Rocky/Alma (ver role "docker").
+# (El módulo community.docker.docker_compose_v2 haría
+# lo mismo, pero requiere community.docker >= 3.6.0 y
+# el paquete "ansible" de Debian 12 trae 3.4.x.)
+#
+# Idempotencia: "docker compose up" por defecto es
+# recreate=auto — compara el hash de cada servicio y
+# solo recrea los que cambiaron; sin cambios, no toca
+# nada (0 downtime). El contenido de los bind mounts
+# no entra en ese hash, por eso el docker-compose.yml.j2
+# lleva una etiqueta "config-hash" por servicio con el
+# checksum de su configuración: al cambiar la config
+# cambia la etiqueta y compose recrea solo ese servicio.
+# ========================================
+- name: Generar docker-compose.yml del stack LGTM
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ lgtm_config_dir }}/docker-compose.yml"
+    mode: '0644'
+
+- name: Levantar stack LGTM con docker compose
+  command: docker compose up -d --remove-orphans
+  args:
+    chdir: "{{ lgtm_config_dir }}"
+  register: compose_up
+  changed_when: >-
+    'Started' in compose_up.stderr
+    or 'Created' in compose_up.stderr
+    or 'Recreated' in compose_up.stderr
+
+# ========================================
+# Esperar servicios
+# ========================================
+- name: Esperar a que los servicios estén disponibles
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ item }}"
+    timeout: 90
+  loop:
+    - "{{ loki_port }}"
+    - "{{ tempo_port }}"
+    - "{{ mimir_port }}"
+    - "{{ grafana_port }}"
+
+# ========================================
+# Estado contenedores
+# ========================================
+- name: Verificar contenedores
+  command: >
+    docker ps
+    --format "table {% raw %}{{.Names}}\t{{.Status}}\t{{.Ports}}{% endraw %}"
+  register: containers_status
+  changed_when: false
+
+- name: Mostrar contenedores
+  debug:
+    msg: "{{ containers_status.stdout_lines }}"
+
+# ========================================
+# Mensaje final
+# ========================================
+- name: Mensaje final
+  debug:
+    msg: |
+      ========================================
+      LGTM Stack desplegado correctamente
+      ========================================
+
+      Grafana:
+        URL:      http://{{ ansible_host }}:3000
+        Usuario:  admin
+        Password: admin
+
+      Loki:
+        URL: http://{{ ansible_host }}:3100
+
+      Tempo:
+        URL:          http://{{ ansible_host }}:3200
+        OTLP gRPC:    {{ ansible_host }}:4317
+        OTLP HTTP:    {{ ansible_host }}:4318
+        Jaeger HTTP:  http://{{ ansible_host }}:14268/api/traces
+        Jaeger gRPC:  {{ ansible_host }}:14250
+
+      Mimir:
+        URL: http://{{ ansible_host }}:9009

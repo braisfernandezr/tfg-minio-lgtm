@@ -1,0 +1,54 @@
+---
+# ========================================
+# MinIO - endpoint del cluster distribuido
+# Usar nginx o haproxy como balanceador
+# entre minio-1 y minio-2 en producción.
+# Por ahora apuntamos al LB o a minio-1.
+# ========================================
+minio_endpoint: "192.168.56.10:9000"
+minio_access_key: "minioadmin"
+minio_secret_key: "minioadmin123"
+# Región requerida por Mimir aunque MinIO la ignore
+minio_region: "us-east-1"
+
+# ========================================
+# Buckets
+# ========================================
+loki_bucket: "loki-data"
+tempo_bucket: "tempo-data"
+mimir_blocks_bucket: "mimir-blocks"
+mimir_ruler_bucket: "mimir-ruler"
+mimir_alertmanager_bucket: "mimir-alertmanager"
+
+# ========================================
+# Puertos
+# ========================================
+loki_port: 3100
+tempo_port: 3200
+mimir_port: 9009
+grafana_port: 3000
+
+# ========================================
+# Directorios
+# ========================================
+lgtm_config_dir: /etc/lgtm
+lgtm_data_dir: /var/lib/lgtm
+
+# ========================================
+# Dashboards de Grafana (provisionados desde grafana.com)
+# 1860 = Node Exporter Full, casa con las métricas que expone
+# prometheus.exporter.unix en el role grafana_alloy (job=integrations/unix)
+# ========================================
+grafana_dashboard_ids:
+  - 1860
+
+# ========================================
+# Dashboards que no están (ya) en el portal de grafana.com
+# y se descargan directamente de su JSON fuente. El dashboard
+# oficial de MinIO (antes ID 13502 en grafana.com, retirado del
+# portal) se mantiene en el propio repo de minio/minio, en sync
+# con las métricas que expone cada release del servidor.
+# ========================================
+grafana_dashboard_urls:
+  - name: minio-cluster
+    url: https://raw.githubusercontent.com/minio/minio/master/docs/metrics/prometheus/grafana/minio-dashboard.json

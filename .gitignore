@@ -1,0 +1,62 @@
+# Vagrant
+.vagrant/
+*.box
+controller_key.pub
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claves SSH temporales
+*.pub
+*.pem
+id_rsa*
+
+#licencia minio
+
+minio.license
+
+#Discos máquinas
+*.vdi
+
+# LaTeX: ficheros intermedios de compilación (el .pdf sí se versiona)
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lol
+*.lot
+*.out
+*.toc
+*.acn
+*.acr
+*.alg
+*.glg
+*.glo
+*.gls
+*.ist
+*.synctex.gz
+*.xdv
+
+# Plantilla original descargada (redundante con el directorio extraído)
+modelo-tfg-fic-v1.7_2526set.zip
+
+# Temporales varios
+*.tmp

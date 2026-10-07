@@ -1,0 +1,104 @@
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: {{ minio_endpoint }}
+      access_key_id: {{ minio_access_key }}
+      secret_access_key: {{ minio_secret_key }}
+      region: {{ minio_region }}
+      insecure: true
+
+blocks_storage:
+  backend: s3
+  s3:
+    endpoint: {{ minio_endpoint }}
+    bucket_name: {{ mimir_blocks_bucket }}
+    access_key_id: {{ minio_access_key }}
+    secret_access_key: {{ minio_secret_key }}
+    region: {{ minio_region }}
+    insecure: true
+  bucket_store:
+    bucket_index:
+      # FIX: por defecto 1h. El querier rechaza el bucket index si supera esa
+      # antiguedad y devuelve "the bucket index is too old", fallando la
+      # consulta entera. Como el laboratorio se apaga entre sesiones, al
+      # arrancar el indice siempre trae horas de retraso, y las consultas de
+      # mas de 12h (query_store_after: las que van al almacen y no al
+      # ingester) fallaban hasta que el compactor lo reescribia. Con mas
+      # margen siguen respondiendo mientras el compactor se pone al dia.
+      max_stale_period: 6h
+
+ruler_storage:
+  backend: s3
+  s3:
+    endpoint: {{ minio_endpoint }}
+    bucket_name: {{ mimir_ruler_bucket }}
+    access_key_id: {{ minio_access_key }}
+    secret_access_key: {{ minio_secret_key }}
+    region: {{ minio_region }}
+    insecure: true
+
+alertmanager_storage:
+  backend: s3
+  s3:
+    endpoint: {{ minio_endpoint }}
+    bucket_name: {{ mimir_alertmanager_bucket }}
+    access_key_id: {{ minio_access_key }}
+    secret_access_key: {{ minio_secret_key }}
+    region: {{ minio_region }}
+    insecure: true
+
+ingester:
+  ring:
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+
+distributor:
+  ring:
+    kvstore:
+      store: inmemory
+
+store_gateway:
+  sharding_ring:
+    kvstore:
+      store: inmemory
+
+compactor:
+  data_dir: /tmp/mimir/compactor
+  # FIX: por defecto 15m. Este es el intervalo con el que el limpiador de
+  # bloques reescribe el bucket index. El clúster de MinIO tiene dos nodos, asi
+  # que basta con que uno no este listo para caer por debajo del quorum de
+  # escritura y que la subida del indice falle con "Resource requested is
+  # unwritable". Eso pasa en cada arranque del laboratorio, porque Mimir
+  # levanta en minio-1 (restart: always) antes de que el servicio MinIO de
+  # minio-2 este disponible. Al fallar, el indice se queda obsoleto hasta el
+  # siguiente ciclo, asi que se acorta la espera.
+  cleanup_interval: 5m
+
+activity_tracker:
+  filepath: /tmp/mimir/activity.log
+
+# FIX: dashboards de Grafana con varios paneles devolvian HTTP 429
+# "too many outstanding requests". Mimir corre en -target=all sobre
+# minio-1 (2 vCPU, 3 GB compartidos con MinIO, Loki, Tempo y Grafana):
+# cada consulta de un panel se parte por intervalo y luego se divide en
+# query_sharding_total_shards subconsultas, que se encolan todas en el
+# query-scheduler. Con multitenancy desactivado esa cola es unica para
+# todo el sistema, asi que se agotaba enseguida.
+query_scheduler:
+  # Por defecto 100. Es el limite que se estaba alcanzando.
+  max_outstanding_requests_per_tenant: 2048
+
+limits:
+  # Por defecto 14 y 16 respectivamente. Con querier.max_concurrent = 8
+  # sobre 2 vCPU, abrir mas subconsultas en paralelo no acelera nada:
+  # solo llena la cola. Se reducen para que el abanico encaje en la
+  # capacidad real de ejecucion del nodo.
+  max_query_parallelism: 8
+  query_sharding_total_shards: 4

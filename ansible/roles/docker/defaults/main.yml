@@ -1,0 +1,9 @@
+---
+# docker_user y docker_version ya se definen en
+# group_vars/all.yml para todo el inventario. Se dejan
+# aquí también como valores por defecto del role, por si
+# se reutiliza este role suelto (fuera de este inventario)
+# sin esos group_vars cargados. group_vars/all.yml, al
+# tener mayor precedencia que los defaults de un role,
+# seguirá ganando dentro de este proyecto.
+docker_user: vagrant

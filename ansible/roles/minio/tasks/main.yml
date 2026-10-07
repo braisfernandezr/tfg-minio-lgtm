@@ -1,0 +1,337 @@
+---
+# ========================================
+# Role: minio
+#
+# Responsabilidad: desplegar MinIO Open Source en modo
+# distribuido (pensado para el grupo de inventario
+# "minio": minio-1 y minio-2).
+#
+# El firewall (firewalld en Rocky/Alma) NO se toca aquí:
+# eso es responsabilidad del role "firewall", que debe
+# ejecutarse antes que este en la play que los invoque.
+# ========================================
+
+# ========================================
+# Información
+# ========================================
+- name: Mostrar información del host
+  debug:
+    msg: "Configurando MinIO en {{ inventory_hostname }} ({{ ansible_host }})"
+
+# ========================================
+# Instalación según distribución
+# ========================================
+
+# DEBIAN/UBUNTU
+- name: Descargar MinIO DEB (Debian/Ubuntu)
+  get_url:
+    # dl.min.io ya no sirve NINGUN binario (MinIO retiro por completo la
+    # edicion Community en 2025-2026, repo archivado sin nuevas builds).
+    # Se mantiene la misma version exacta que se documenta en la memoria
+    # (RELEASE.2025-09-07T16-13-09Z), pero descargada del propio release
+    # de GitHub en lugar de dl.min.io, que si sigue sirviendo los assets
+    # ya publicados aunque el repositorio este archivado.
+    url: https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio_20250907161309.0.0_amd64.deb
+    dest: /tmp/minio.deb
+    mode: '0644'
+    checksum: sha256:eeda08f699f6592d1b868ac8bda864ae2cacdb5ee1b888663366e8c8ff566249
+  when: ansible_os_family == "Debian"
+
+- name: Instalar MinIO DEB (Debian/Ubuntu)
+  apt:
+    deb: /tmp/minio.deb
+    state: present
+  when: ansible_os_family == "Debian"
+
+# ROCKY/ALMA LINUX
+- name: Descargar MinIO RPM (Rocky/Alma)
+  get_url:
+    # Ver comentario equivalente en la descarga del DEB, unas lineas mas
+    # arriba: se descarga del release de GitHub en lugar de dl.min.io.
+    url: https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio-20250907161309.0.0-1.x86_64.rpm
+    dest: /tmp/minio.rpm
+    mode: '0644'
+    checksum: sha256:8b9df992b1e90063489fd90117811e7a50f7f4473ea229df5d4e413c141d3028
+  when: ansible_os_family == "RedHat"
+
+- name: Instalar MinIO RPM (Rocky/Alma)
+  dnf:
+    name: /tmp/minio.rpm
+    state: present
+    disable_gpg_check: yes
+  when: ansible_os_family == "RedHat"
+
+# FIX: tanto el RPM (Rocky/Alma) como el DEB (Debian/Ubuntu)
+# de MinIO instalan el binario en /usr/local/bin, no en
+# /usr/bin. La verificación de abajo usa la ruta absoluta
+# /usr/bin/minio (no depende de $PATH), así que sin este
+# symlink falla en cualquier SO, no solo en Rocky/Alma.
+- name: Crear symlink de minio en /usr/bin
+  file:
+    src: /usr/local/bin/minio
+    dest: /usr/bin/minio
+    state: link
+
+- name: Verificar que MinIO se instaló correctamente
+  command: /usr/bin/minio --version
+  register: minio_version
+  changed_when: false
+
+- name: Mostrar versión de MinIO instalada
+  debug:
+    msg: "{{ minio_version.stdout }}"
+
+# ========================================
+# Crear usuario y grupo para MinIO
+# ========================================
+- name: Crear grupo minio-user
+  group:
+    name: "{{ minio_group }}"
+    system: yes
+    state: present
+
+- name: Crear usuario minio-user (sin home directory)
+  user:
+    name: "{{ minio_user }}"
+    group: "{{ minio_group }}"
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+    state: present
+
+# ========================================
+# Preparación de directorios y disco
+# ========================================
+- name: Detectar disco adicional para MinIO
+  shell: lsblk -dpno NAME,SIZE | grep -v sda | grep -v loop | awk 'NR==1 {print $1}'
+  register: minio_disk
+  changed_when: false
+
+- name: Mostrar disco detectado
+  debug:
+    msg: "Disco adicional detectado: {{ minio_disk.stdout }}"
+
+# DEBIAN/UBUNTU
+- name: Instalar parted (Debian/Ubuntu)
+  apt:
+    name: parted
+    state: present
+  when: ansible_os_family == "Debian"
+
+# ROCKY/ALMA LINUX
+- name: Instalar parted (Rocky/Alma)
+  dnf:
+    name: parted
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Crear partición en disco adicional
+  parted:
+    device: "{{ minio_disk.stdout }}"
+    number: 1
+    state: present
+    part_end: "100%"
+  when: minio_disk.stdout != ""
+
+- name: Formatear partición como ext4
+  filesystem:
+    fstype: ext4
+    dev: "{{ minio_disk.stdout }}1"
+  when: minio_disk.stdout != ""
+
+- name: Crear directorio /mnt/disk1
+  file:
+    path: /mnt/disk1
+    state: directory
+    mode: '0755'
+
+- name: Montar partición en /mnt/disk1
+  mount:
+    path: /mnt/disk1
+    src: "{{ minio_disk.stdout }}1"
+    fstype: ext4
+    opts: defaults
+    state: mounted
+  when: minio_disk.stdout != ""
+
+- name: Crear directorio de datos para MinIO
+  file:
+    path: "{{ minio_data_dir }}"
+    state: directory
+    owner: "{{ minio_user }}"
+    group: "{{ minio_group }}"
+    mode: '0755'
+
+- name: Crear directorio de certificados
+  file:
+    path: "{{ minio_certs_dir }}"
+    state: directory
+    owner: "{{ minio_user }}"
+    group: "{{ minio_group }}"
+    mode: '0755'
+
+# ========================================
+# Configuración de /etc/hosts
+# ========================================
+- name: Añadir entradas a /etc/hosts para cluster MinIO
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      192.168.56.10 minio-1.local minio-1
+      192.168.56.11 minio-2.local minio-2
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - MinIO Cluster"
+    state: present
+
+# ========================================
+# Archivo de configuración
+# ========================================
+- name: Crear archivo de configuración /etc/default/minio
+  template:
+    src: minio-env.j2
+    dest: "{{ minio_config_file }}"
+    owner: "{{ minio_user }}"
+    group: "{{ minio_group }}"
+    mode: '0640'
+
+# ========================================
+# Servicio systemd
+# ========================================
+- name: Recargar systemd daemon
+  systemd:
+    daemon_reload: yes
+
+- name: Habilitar servicio MinIO
+  systemd:
+    name: minio
+    enabled: yes
+
+- name: Iniciar servicio MinIO
+  systemd:
+    name: minio
+    state: started
+
+- name: Esperar a que MinIO esté disponible
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ minio_api_port }}"
+    timeout: 60
+    state: started
+
+# ========================================
+# Verificación
+# ========================================
+- name: Verificar estado del servicio MinIO
+  systemd:
+    name: minio
+    state: started
+  register: minio_service_status
+
+- name: Mostrar estado del servicio
+  debug:
+    msg: "MinIO está {{ 'corriendo' if minio_service_status.status.ActiveState == 'active' else 'detenido' }}"
+
+- name: Obtener logs del servicio (últimas 20 líneas)
+  command: journalctl -u minio -n 20 --no-pager
+  register: minio_logs
+  changed_when: false
+
+- name: Mostrar logs de MinIO
+  debug:
+    msg: "{{ minio_logs.stdout_lines }}"
+
+# ========================================
+# Token Prometheus del cluster
+# (lo consume el role "grafana_alloy" para
+# scrapear /minio/v2/metrics/cluster; ver
+# roles/grafana_alloy/templates/config.alloy.j2.
+# Solo hace falta generarlo una vez para todo
+# el cluster, así que run_once lo ejecuta en
+# el primer host de groups['minio'].)
+# ========================================
+- name: Instalar MinIO Client (mc)
+  get_url:
+    # dl.min.io tampoco sirve ya el cliente: la ruta
+    # /client/mc/release/linux-amd64/mc devuelve 410 Gone desde que
+    # MinIO retiro la edicion Community. Se descarga el binario del
+    # release de GitHub de minio/mc, que si sigue publicado, fijando
+    # una version concreta (RELEASE.2025-08-13T08-35-41Z) y su
+    # checksum en lugar de depender de un "latest" movil.
+    url: https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z
+    dest: /usr/bin/mc
+    mode: '0755'
+    checksum: sha256:01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+  run_once: true
+
+- name: Configurar alias MinIO para mc
+  shell: |
+    mc alias set local http://{{ ansible_host }}:{{ minio_api_port }} {{ minio_root_user }} {{ minio_root_password }} --insecure
+  changed_when: false
+  run_once: true
+
+- name: Comprobar si ya existe el token de Prometheus
+  stat:
+    path: /etc/minio-prometheus-token
+  register: token_file
+  run_once: true
+
+- name: Generar token Prometheus del cluster MinIO
+  command: mc admin prometheus generate local
+  register: minio_prometheus_generate
+  changed_when: false
+  run_once: true
+  when: not token_file.stat.exists
+
+# Se guarda en disco (no solo en un set_fact en memoria) porque
+# el role "grafana_alloy" se puede ejecutar en una invocación
+# separada de "ansible-playbook" (p. ej. "--tags grafana_alloy"
+# suelto, ver comentarios de site.yml); un set_fact de esta play
+# no sobrevive a un proceso "ansible-playbook" distinto, un
+# fichero sí.
+- name: Guardar bearer_token del cluster MinIO
+  copy:
+    content: "{{ (minio_prometheus_generate.stdout | regex_search('bearer_token:\\s*(\\S+)', '\\1'))[0] }}"
+    dest: /etc/minio-prometheus-token
+    mode: '0644'
+  run_once: true
+  when: not token_file.stat.exists
+
+- name: Mensaje final de éxito
+  debug:
+    msg: |
+      ✓ MinIO Open Source desplegado correctamente en {{ inventory_hostname }}
+
+      Consola web:
+        URL:        http://{{ ansible_host }}:{{ minio_console_port }}
+        Usuario:    {{ minio_root_user }}
+        Contraseña: {{ minio_root_password }}
+
+      API endpoint: http://{{ ansible_host }}:{{ minio_api_port }}
+
+# ========================================
+# Resumen final del cluster
+# (run_once hace que solo se
+# imprima una vez aunque el role corra en cada host
+# del grupo "minio")
+# ========================================
+- name: Mostrar información del cluster
+  debug:
+    msg: |
+      ========================================
+      MinIO Cluster Distribuido Desplegado
+      ========================================
+      Nodos: {{ groups['minio'] | length }}
+
+      Consolas Web:
+      {% for host in groups['minio'] %}
+        • {{ host }}: http://{{ hostvars[host].ansible_host }}:9001
+      {% endfor %}
+
+      Credenciales:
+        Usuario:    minioadmin
+        Contraseña: minioadmin123
+
+      IMPORTANTE:
+        - Cambia las credenciales por defecto en producción
+        - Considera habilitar TLS para conexiones seguras
+        - Verifica que todos los nodos están sincronizados
+  run_once: true

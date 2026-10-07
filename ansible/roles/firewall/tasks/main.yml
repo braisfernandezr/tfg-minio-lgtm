@@ -1,0 +1,119 @@
+---
+# ========================================
+# Role: firewall
+#
+# Responsabilidad única: neutralizar firewalld en
+# Rocky/Alma para que el resto de roles (minio,
+# grafana_alloy, lgtm_stack) puedan asumir que los
+# puertos que necesitan están abiertos.
+#
+# Este role no hace nada en Debian/Ubuntu: firewalld no
+# viene activo por defecto en esas distros, así que no
+# hay nada que neutralizar.
+#
+# Motivo de extraerlo a su propio role: esta misma
+# secuencia de 3 tareas estaba copiada y pegada de forma
+# IDÉNTICA en los tres playbooks planos originales (hoy
+# fuera del proyecto). Con roles, se define una vez
+# aquí y los demás roles simplemente lo referencian.
+# ========================================
+
+- name: Comprobar si firewalld está instalado
+  command: rpm -q firewalld
+  register: firewalld_installed
+  changed_when: false
+  failed_when: false
+  when: ansible_os_family == "RedHat"
+
+- name: Determinar si este host tiene firewalld que gestionar
+  set_fact:
+    firewalld_present: "{{ ansible_os_family == 'RedHat' and (firewalld_installed.rc | default(1)) == 0 }}"
+
+# ========================================
+# Sondeo del estado actual (solo lectura)
+#
+# FIX (idempotencia): la maniobra de arrancar-y-parar de
+# más abajo cambia el estado del servicio por definición,
+# así que ejecutarla incondicionalmente hacía que CADA
+# pasada reportase changed=2 por host, y como el role
+# aparece en tres plays de site.yml, una segunda ejecución
+# sin cambios nunca podía dar changed=0 en Rocky/Alma.
+# La maniobra solo es necesaria si queda algo que
+# neutralizar, y eso son tres situaciones distintas:
+#   - el servicio está corriendo ahora mismo,
+#   - está deshabilitado ahora pero volvería en el próximo
+#     arranque (enabled),
+#   - está parado y deshabilitado, pero dejó su tabla
+#     nftables huérfana y activa en el kernel (el caso
+#     descrito en el bloque FIX de abajo).
+# Si no se da ninguna, el estado deseado ya se cumple y el
+# role no debe tocar nada.
+# ========================================
+- name: Consultar si firewalld está activo
+  command: systemctl is-active firewalld
+  register: firewalld_active
+  changed_when: false
+  failed_when: false
+  when: firewalld_present
+
+- name: Consultar si firewalld arrancaría en el próximo boot
+  command: systemctl is-enabled firewalld
+  register: firewalld_enabled
+  changed_when: false
+  failed_when: false
+  when: firewalld_present
+
+# Si nft no está instalado, el comando falla, stdout queda
+# vacío y esta condición simplemente no aporta nada.
+- name: Comprobar si queda una tabla nftables de firewalld en el kernel
+  command: nft list tables
+  register: firewalld_nft_tables
+  changed_when: false
+  failed_when: false
+  when: firewalld_present
+
+- name: Determinar si hace falta neutralizar firewalld
+  set_fact:
+    firewalld_needs_neutralizing: >-
+      {{ firewalld_present
+         and (firewalld_active.stdout | default('') | trim == 'active'
+              or firewalld_enabled.stdout | default('') | trim == 'enabled'
+              or 'firewalld' in (firewalld_nft_tables.stdout | default(''))) }}
+
+- name: Informar del estado de firewalld
+  debug:
+    msg: >-
+      {{ 'firewalld ya está neutralizado (parado, deshabilitado y sin tabla nftables residual): no se toca nada'
+         if not firewalld_needs_neutralizing
+         else 'firewalld requiere neutralización en esta pasada' }}
+  when: firewalld_present
+
+# ========================================
+# Neutralización
+#
+# FIX: la tabla nftables de firewalld se crea con
+# "flags owner,persist": solo el proceso que la creó
+# (el propio demonio) puede borrarla/modificarla, y
+# sobrevive aunque el demonio muera. Si se para el
+# servicio sin más, esa tabla puede quedar huérfana
+# pero activa en el kernel, rechazando tráfico (p. ej.
+# el 9000 entre minio-1/minio-2) aunque
+# "systemctl status firewalld" diga inactive, y ni
+# siquiera "nft delete table" como root puede tocarla
+# (da "Operation not permitted"). Por eso se arranca
+# primero (para que reclame la propiedad de su tabla
+# persistente) y se para después, dejando que sea el
+# propio firewalld quien la limpie correctamente.
+# ========================================
+- name: Arrancar firewalld (para que reclame su tabla nftables persistente)
+  systemd:
+    name: firewalld
+    state: started
+  when: firewalld_needs_neutralizing
+
+- name: Detener y deshabilitar firewalld (Rocky/Alma)
+  systemd:
+    name: firewalld
+    state: stopped
+    enabled: no
+  when: firewalld_needs_neutralizing

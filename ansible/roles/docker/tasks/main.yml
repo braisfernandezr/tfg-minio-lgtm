@@ -1,0 +1,147 @@
+---
+# ========================================
+# Role: docker
+#
+# Responsabilidad: instalar Docker CE + Docker Compose
+# plugin en cualquier host del inventario (Debian/Ubuntu
+# o Rocky/Alma), y en RedHat además las dependencias
+# Python que necesitan los módulos de Ansible
+# (docker_image/docker_container/docker_network) que usan
+# los roles grafana_alloy y lgtm_stack.
+# ========================================
+
+- name: Detectar sistema operativo
+  debug:
+    msg: "Sistema operativo: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+# ========================================
+# Instalación en Debian/Ubuntu
+# ========================================
+- name: Instalar dependencias para Docker (Debian/Ubuntu)
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Añadir clave GPG de Docker (Debian/Ubuntu)
+  apt_key:
+    url: https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Añadir repositorio de Docker (Debian/Ubuntu)
+  apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Instalar Docker (Debian/Ubuntu)
+  apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+# ========================================
+# Instalación en Rocky/Alma Linux
+# ========================================
+- name: Instalar dependencias para Docker (Rocky/Alma)
+  dnf:
+    name:
+      - dnf-plugins-core
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Añadir repositorio de Docker (Rocky/Alma)
+  command: dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+  args:
+    creates: /etc/yum.repos.d/docker-ce.repo
+  when: ansible_os_family == "RedHat"
+
+- name: Instalar Docker (Rocky/Alma)
+  dnf:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+  when: ansible_os_family == "RedHat"
+
+# ========================================
+# Dependencias Python para módulos Ansible
+# de Docker (docker_image, docker_container,
+# docker_network) usados en los roles
+# grafana_alloy y lgtm_stack.
+# FIX: en Rocky/Alma no viene preinstalado el
+# módulo "requests" ni el SDK "docker" de Python,
+# y esos módulos fallan sin ellos.
+# ========================================
+- name: Instalar python3-pip (Rocky/Alma)
+  dnf:
+    name: python3-pip
+    state: present
+  when: ansible_os_family == "RedHat"
+
+# FIX: "requests" >= 2.32 rompe el registro del
+# esquema "http+docker" que usan tanto el SDK
+# "docker" de Python como los módulos de Ansible
+# community.docker (docker_image/docker_container),
+# dando el error "Not supported URL scheme
+# http+docker". La colección community.docker que
+# trae el "ansible" de dnf en Rocky/Alma es antigua
+# (sin el workaround para requests >= 2.32), así que
+# la solución robusta es fijar "requests" por debajo
+# de esa versión en el host donde se ejecuta el
+# módulo (no en el controlador).
+- name: Instalar Docker SDK para Python y requests (Rocky/Alma)
+  pip:
+    name:
+      - "requests==2.31.0"
+      - docker
+    executable: pip3
+    state: present
+  when: ansible_os_family == "RedHat"
+
+# ========================================
+# Configuración común
+# ========================================
+- name: Asegurar que Docker está habilitado y corriendo
+  systemd:
+    name: docker
+    enabled: yes
+    state: started
+
+- name: Añadir usuario vagrant al grupo docker
+  user:
+    name: "{{ docker_user }}"
+    groups: docker
+    append: yes
+
+- name: Verificar instalación de Docker
+  command: docker --version
+  register: docker_version_output
+  changed_when: false
+
+- name: Mostrar versión de Docker instalada
+  debug:
+    msg: "{{ docker_version_output.stdout }}"
+
+- name: Verificar Docker Compose
+  command: docker compose version
+  register: compose_version_output
+  changed_when: false
+
+- name: Mostrar versión de Docker Compose
+  debug:
+    msg: "{{ compose_version_output.stdout }}"

@@ -1,0 +1,4 @@
+# Configuración del sistema operativo para las máquinas virtuales
+# Opciones disponibles: debian, rocky, alma
+
+sistema_operativo: rocky

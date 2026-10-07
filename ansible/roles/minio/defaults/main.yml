@@ -1,0 +1,14 @@
+---
+minio_user: minio-user
+minio_group: minio-user
+minio_data_dir: /mnt/disk1/minio
+minio_certs_dir: /opt/minio/certs
+minio_config_file: /etc/default/minio
+minio_api_port: 9000
+minio_console_port: 9001
+minio_root_user: minioadmin
+minio_root_password: minioadmin123
+
+# Configuración del cluster distribuido
+# MinIO usa notación de expansión {x...y} para nodos secuenciales
+minio_volumes: "http://minio-{1...2}.local:9000/mnt/disk1/minio"

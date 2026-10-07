@@ -1,0 +1,27 @@
+---
+alloy_config_dir: /etc/alloy
+alloy_data_dir: /var/lib/alloy/data
+
+alloy_http_port: 12345
+alloy_otlp_grpc_port: 4317
+alloy_otlp_http_port: 4318
+
+alloy_container_name: grafana-alloy
+alloy_image: grafana/alloy:latest
+
+# ========================================
+# LGTM Endpoints (minio-1)
+# ========================================
+loki_url: "http://192.168.56.10:3100/loki/api/v1/push"
+mimir_url: "http://192.168.56.10:9009/api/v1/push"
+tempo_endpoint: "192.168.56.10:4317"
+
+# ========================================
+# App TNS - nodos donde se despliega
+# (vía docker-compose.yml, ver README).
+# Los puertos 8000/8001/8002 son los
+# que expone docker-compose de TNS
+# ========================================
+tns_hosts:
+  - "app-monitor-1"
+  - "app-monitor-2"

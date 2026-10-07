@@ -1,0 +1,231 @@
+---
+# ========================================
+# Role: grafana_alloy
+#
+# Responsabilidad: desplegar el agente Grafana Alloy
+# (como contenedor Docker) en el grupo de inventario
+# "monitoring" (app-monitor-1, app-monitor-2).
+#
+# Requiere que Docker ya esté instalado (role "docker")
+# y que el firewall ya esté neutralizado en Rocky/Alma
+# (role "firewall"), ambos ejecutados antes en la play.
+#
+# Fixes aplicados en el .alloy (ver templates/config.alloy.j2):
+#   - discovery.docker correcto para logs
+#   - scrape de métricas de la app TNS
+#   - labels de host en métricas y logs
+#   - /var/log montado y usado
+#
+# NOTA: las trazas Jaeger de TNS van directas al receiver nativo
+# de Tempo en minio-1 (ver docker-compose.yml), no a través de este
+# Alloy — no hay receiver Jaeger aquí (ver nota en config.alloy.j2).
+# ========================================
+
+# ========================================
+# Información
+# ========================================
+- name: Mostrar información del host
+  debug:
+    msg: "Configurando Grafana Alloy en {{ inventory_hostname }} ({{ ansible_host }})"
+
+# ========================================
+# Verificar Docker
+# ========================================
+- name: Verificar que Docker está instalado
+  command: docker --version
+  register: docker_version
+  changed_when: false
+  failed_when: docker_version.rc != 0
+
+- name: Mostrar versión de Docker
+  debug:
+    msg: "{{ docker_version.stdout }}"
+
+# ========================================
+# Crear directorios
+# ========================================
+- name: Crear directorios de Alloy
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ alloy_config_dir }}"
+    - "{{ alloy_data_dir }}"
+
+# ========================================
+# Token Prometheus de MinIO (para el scrape de
+# /minio/v2/metrics/cluster, ver config.alloy.j2)
+# Se lee del fichero que escribe el role "minio"
+# en lugar de depender de un set_fact suyo: ese
+# set_fact solo vive en memoria durante la misma
+# invocación de "ansible-playbook", y este role se
+# puede ejecutar suelto (--tags grafana_alloy) en
+# una invocación distinta.
+# ========================================
+- name: Leer bearer_token de MinIO
+  slurp:
+    src: /etc/minio-prometheus-token
+  delegate_to: "{{ groups['minio'][0] }}"
+  register: minio_prometheus_token_file
+  when: inventory_hostname == groups['monitoring'][0]
+
+- name: Decodificar bearer_token de MinIO
+  set_fact:
+    minio_prometheus_bearer_token: "{{ minio_prometheus_token_file.content | b64decode | trim }}"
+  when: inventory_hostname == groups['monitoring'][0]
+
+# ========================================
+# Configuración Alloy
+# ========================================
+- name: Crear configuración de Alloy
+  template:
+    src: config.alloy.j2
+    dest: "{{ alloy_config_dir }}/config.alloy"
+    mode: '0644'
+  register: alloy_config
+
+# ========================================
+# Descargar imagen
+# ========================================
+- name: Descargar imagen de Alloy
+  docker_image:
+    name: "{{ alloy_image }}"
+    source: pull
+    state: present
+
+# ========================================
+# Ejecutar Alloy
+#
+# Idempotencia (mismo criterio que el role "lgtm_stack"):
+# NO se borra y recrea el contenedor en cada ejecución. El
+# módulo docker_container es declarativo — si el contenedor
+# ya existe con la misma imagen y parámetros, no lo toca
+# (0 downtime). Pero el contenido del bind mount de la
+# config NO forma parte de esos parámetros, así que un cambio
+# en config.alloy no se detectaría por sí solo. Por eso se
+# añade la etiqueta "config-hash" con el checksum del fichero
+# renderizado: al cambiar la config cambia el hash, la
+# comparación de labels (allow_more_present) detecta la
+# diferencia y docker_container recrea el contenedor para que
+# Alloy relea la config. Sin cambios, la tarea queda "ok".
+# ========================================
+- name: Ejecutar contenedor Alloy
+  docker_container:
+    name: "{{ alloy_container_name }}"
+    image: "{{ alloy_image }}"
+    state: started
+    restart_policy: always
+    network_mode: host
+
+    labels:
+      config-hash: "{{ alloy_config.checksum }}"
+
+    volumes:
+      - "{{ alloy_config_dir }}/config.alloy:/etc/alloy/config.alloy:ro"
+      - "{{ alloy_data_dir }}:/var/lib/alloy/data"
+      - "/var/log:/var/log:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+    command: >
+      run
+      --server.http.listen-addr=0.0.0.0:12345
+      --storage.path=/var/lib/alloy/data
+      /etc/alloy/config.alloy
+
+# ========================================
+# Esperar servicio
+# ========================================
+- name: Esperar a que Alloy esté disponible
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ alloy_http_port }}"
+    timeout: 60
+    state: started
+
+# ========================================
+# Estado contenedor
+# ========================================
+- name: Verificar estado del contenedor
+  command: >
+    docker ps
+    --filter name={{ alloy_container_name }}
+    --format "table {% raw %}{{.Names}}\t{{.Status}}\t{{.Ports}}{% endraw %}"
+  register: container_status
+  changed_when: false
+
+- name: Mostrar estado del contenedor
+  debug:
+    msg: "{{ container_status.stdout_lines }}"
+
+# ========================================
+# Logs
+# ========================================
+- name: Obtener logs de Alloy
+  command: docker logs --tail 30 {{ alloy_container_name }}
+  register: alloy_logs
+  changed_when: false
+
+- name: Mostrar logs de Alloy
+  debug:
+    msg: "{{ alloy_logs.stdout_lines }}"
+
+# ========================================
+# Mensaje final
+# ========================================
+- name: Mostrar mensaje final
+  debug:
+    msg: |
+      ========================================
+      Grafana Alloy desplegado correctamente
+      ========================================
+
+      Host: {{ inventory_hostname }}
+
+      Alloy UI:
+        http://{{ ansible_host }}:{{ alloy_http_port }}
+
+      OTLP Endpoints:
+        gRPC: {{ ansible_host }}:4317
+        HTTP: {{ ansible_host }}:4318
+
+      Integraciones activas:
+        ✓ Metrics sistema  -> Mimir
+      {% if inventory_hostname in tns_hosts %}
+        ✓ Metrics TNS      -> Mimir
+      {% endif %}
+        ✓ Logs Docker      -> Loki
+        ✓ Logs sistema     -> Loki
+        ✓ Traces OTLP      -> Tempo
+      {% if inventory_hostname in tns_hosts %}
+        ✓ Traces Jaeger (TNS) -> Tempo directamente (no pasa por Alloy)
+      {% endif %}
+
+# ========================================
+# Resumen global
+# (run_once hace que
+# solo se imprima una vez aunque el role corra en
+# cada host del grupo "monitoring")
+# ========================================
+- name: Mostrar resumen final
+  debug:
+    msg: |
+      ========================================
+      GRAFANA ALLOY DESPLEGADO
+      ========================================
+
+      Nodos:
+      {% for host in groups['monitoring'] %}
+        • {{ host }}
+          UI: http://{{ hostvars[host].ansible_host }}:12345
+      {% endfor %}
+
+      Pipeline activo:
+
+        Metrics sistema  -> Alloy -> Mimir
+        Metrics TNS      -> Alloy -> Mimir  ({{ tns_hosts | join(', ') }})
+        Logs Docker      -> Alloy -> Loki
+        Logs sistema     -> Alloy -> Loki
+        Traces OTLP      -> Alloy -> Tempo
+        Traces Jaeger (TNS) -> Tempo directamente, sin pasar por Alloy ({{ tns_hosts | join(', ') }})
+  run_once: true

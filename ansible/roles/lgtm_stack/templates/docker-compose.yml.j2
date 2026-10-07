@@ -1,0 +1,93 @@
+# ========================================
+# Stack LGTM (Loki, Grafana, Tempo, Mimir)
+# Generado por Ansible (role lgtm_stack) — no editar a mano,
+# los cambios se pierden en el siguiente ansible-playbook.
+#
+# Se fijan container_name y el nombre de la red (lgtm-network)
+# para que coincidan con lo que espera datasources.yaml, que
+# referencia a Loki/Tempo/Mimir por nombre de contenedor.
+# ========================================
+name: lgtm
+
+networks:
+  lgtm-network:
+    name: lgtm-network
+
+services:
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    restart: always
+    networks:
+      - lgtm-network
+    ports:
+      - "{{ loki_port }}:3100"
+    volumes:
+      - "{{ lgtm_config_dir }}/loki/loki.yaml:/etc/loki/local-config.yaml"
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    labels:
+      # Checksum de la config bind-mounteada. "docker compose up"
+      # (recreate=auto) calcula el hash del servicio solo con lo que
+      # hay en este fichero: el CONTENIDO de un bind mount no entra,
+      # así que sin esto un cambio en loki.yaml no recrearía nada.
+      # Al cambiar la config cambia la etiqueta -> cambia el hash ->
+      # compose recrea SOLO este contenedor.
+      config-hash: "{{ lookup('template', 'loki.yaml.j2') | hash('sha256') }}"
+
+  # FIX: expuestos puertos Jaeger 14268/14250 para la app TNS,
+  # que envía trazas vía JAEGER_ENDPOINT (no OTLP)
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    restart: always
+    networks:
+      - lgtm-network
+    ports:
+      - "{{ tempo_port }}:3200"
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "14268:14268"  # Jaeger HTTP (para TNS app)
+      - "14250:14250"  # Jaeger gRPC
+    volumes:
+      - "{{ lgtm_config_dir }}/tempo/tempo.yaml:/etc/tempo.yaml"
+    command: ["-config.file=/etc/tempo.yaml"]
+    labels:
+      config-hash: "{{ lookup('template', 'tempo.yaml.j2') | hash('sha256') }}"
+
+  mimir:
+    image: grafana/mimir:latest
+    container_name: mimir
+    restart: always
+    networks:
+      - lgtm-network
+    ports:
+      - "{{ mimir_port }}:9009"
+    volumes:
+      - "{{ lgtm_config_dir }}/mimir/mimir.yaml:/etc/mimir.yaml"
+      - "/tmp/mimir:/tmp/mimir"
+    command: ["-config.file=/etc/mimir.yaml", "-target=all"]
+    labels:
+      config-hash: "{{ lookup('template', 'mimir.yaml.j2') | hash('sha256') }}"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: always
+    networks:
+      - lgtm-network
+    ports:
+      - "{{ grafana_port }}:3000"
+    volumes:
+      - "{{ lgtm_config_dir }}/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml"
+      - "{{ lgtm_config_dir }}/grafana/dashboards-provider.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml"
+      - "{{ lgtm_config_dir }}/grafana/dashboards:/var/lib/grafana/dashboards"
+      - "{{ lgtm_data_dir }}/grafana:/var/lib/grafana"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    labels:
+      # Grafana solo relee el provisioning de datasources y el provider
+      # en el arranque (los dashboards sí se re-escanean cada 30s, por
+      # eso no entran en el hash).
+      config-hash: "{{ (lookup('template', 'datasources.yaml.j2') + lookup('template', 'dashboards-provider.yaml.j2')) | hash('sha256') }}"

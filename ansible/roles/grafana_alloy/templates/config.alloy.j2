@@ -1,0 +1,196 @@
+
+// ========================================
+// Logging
+// ========================================
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ========================================
+// MÉTRICAS - Sistema (node_exporter)
+// FIX: extra_labels para identificar host
+// ========================================
+
+prometheus.exporter.unix "local" {}
+
+discovery.relabel "local_system" {
+  targets = prometheus.exporter.unix.local.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = "{{ inventory_hostname }}"
+  }
+
+  rule {
+    target_label = "host"
+    replacement  = "{{ ansible_host }}"
+  }
+}
+
+prometheus.scrape "local_system" {
+  targets    = discovery.relabel.local_system.output
+
+  // FIX: sin esto Alloy usa su intervalo por defecto (60s), mientras
+  // que Grafana asume 15s al calcular $__rate_interval. Los paneles
+  // con rate() sobre ventanas de 1 minuto se quedaban con una sola
+  // muestra dentro de la ventana y mostraban "No data" de forma
+  // intermitente (CPU, red...), mientras que los paneles de valor
+  // instantaneo (carga, memoria) si funcionaban. Se fija a 15s para
+  // que coincida con el scrape de TNS y con el timeInterval declarado
+  // en el datasource Mimir (datasources.yaml.j2).
+  scrape_interval = "15s"
+
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+{% if inventory_hostname in tns_hosts %}
+// ========================================
+// MÉTRICAS - App TNS
+// Scrape de los servicios db/app/loadgen
+// ========================================
+
+prometheus.scrape "tns_apps" {
+  targets = [
+    { "__address__" = "localhost:8000", "job" = "tns/db",      "instance" = "{{ inventory_hostname }}", "namespace" = "tns" },
+    { "__address__" = "localhost:8001", "job" = "tns/app",     "instance" = "{{ inventory_hostname }}", "namespace" = "tns" },
+    { "__address__" = "localhost:8002", "job" = "tns/loadgen", "instance" = "{{ inventory_hostname }}", "namespace" = "tns" },
+  ]
+
+  scrape_interval = "15s"
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+{% endif %}
+
+{% if inventory_hostname == groups['monitoring'][0] %}
+// ========================================
+// MÉTRICAS - Cluster MinIO
+// Se scrapea solo desde el primer host de
+// "monitoring" para no duplicar la misma
+// serie cluster-wide en cada app-monitor-*.
+// El bearer_token lo genera el role "minio"
+// vía `mc admin prometheus generate` (ver
+// roles/minio/tasks/main.yml) y llega aquí
+// a través de hostvars.
+// ========================================
+
+prometheus.scrape "minio_cluster" {
+  targets = [
+    { "__address__" = "{{ hostvars[groups['minio'][0]].ansible_host }}:9000", "job" = "minio-job", "instance" = "minio-cluster" },
+  ]
+
+  metrics_path = "/minio/v2/metrics/cluster"
+  bearer_token = "{{ minio_prometheus_bearer_token }}"
+
+  // Mismo motivo que en local_system: el timeInterval del datasource
+  // es unico para todo Mimir, asi que todos los scrapes deben usar el
+  // mismo intervalo o los paneles con rate() del dashboard de MinIO
+  // volverian a quedarse cortos de muestras.
+  scrape_interval = "15s"
+
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+{% endif %}
+
+prometheus.remote_write "mimir" {
+  endpoint {
+    url = "{{ mimir_url }}"
+  }
+}
+
+// ========================================
+// LOGS DOCKER -> LOKI
+// FIX: Usar discovery.docker en lugar de
+// targets estáticos que no funcionan
+// ========================================
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+loki.source.docker "docker_logs" {
+  host    = "unix:///var/run/docker.sock"
+  targets = discovery.docker.containers.targets
+
+  forward_to = [loki.process.add_labels.receiver]
+}
+
+// Añadir label de host a todos los logs
+loki.process "add_labels" {
+  stage.static_labels {
+    values = {
+      host     = "{{ inventory_hostname }}",
+      instance = "{{ ansible_host }}",
+    }
+  }
+
+  forward_to = [loki.write.loki.receiver]
+}
+
+// ========================================
+// LOGS DE SISTEMA desde /var/log
+// ========================================
+
+local.file_match "system_logs" {
+  path_targets = [
+    // Debian/Ubuntu
+    { "__path__" = "/var/log/syslog",   "job" = "syslog" },
+    { "__path__" = "/var/log/auth.log", "job" = "auth" },
+    { "__path__" = "/var/log/kern.log", "job" = "kernel" },
+    // Rocky/Alma (RHEL): rutas equivalentes. local.file_match
+    // ignora sin error las rutas que no existen, así que incluir
+    // ambos conjuntos funciona en cualquier distro sin condicionar
+    // por SO (RHEL no tiene syslog/auth.log/kern.log; Debian no
+    // tiene messages/secure).
+    { "__path__" = "/var/log/messages", "job" = "syslog" },
+    { "__path__" = "/var/log/secure",   "job" = "auth" },
+  ]
+}
+
+loki.source.file "system_logs" {
+  targets    = local.file_match.system_logs.targets
+  forward_to = [loki.process.add_labels.receiver]
+}
+
+loki.write "loki" {
+  endpoint {
+    url = "{{ loki_url }}"
+  }
+}
+
+// ========================================
+// OTLP RECEIVER -> TEMPO
+// Para apps que usen OTLP nativo
+// ========================================
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// NOTA: no hay receiver Jaeger aquí. La app TNS envía sus trazas
+// directamente al receiver Jaeger nativo de Tempo en minio-1
+// (JAEGER_ENDPOINT=http://192.168.56.10:14268/api/traces en
+// docker-compose.yml), sin pasar por este Alloy. Un receiver Jaeger
+// local solo tendría sentido si las apps del host lo apuntaran a
+// "localhost:14268", pero los contenedores de TNS corren en la red
+// bridge por defecto de docker-compose (no en network_mode: host),
+// así que "localhost" desde dentro de esos contenedores no llegaría
+// a este Alloy — necesitaría host.docker.internal o la IP del host.
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "{{ tempo_endpoint }}"
+    tls {
+      insecure = true
+    }
+  }
+}

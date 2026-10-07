@@ -1,0 +1,42 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  replication_factor: 1
+
+  ring:
+    kvstore:
+      store: inmemory
+
+  storage:
+    s3:
+      endpoint: {{ minio_endpoint }}
+      bucketnames: {{ loki_bucket }}
+      access_key_id: {{ minio_access_key }}
+      secret_access_key: {{ minio_secret_key }}
+      region: {{ minio_region }}
+      s3forcepathstyle: true
+      insecure: true
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Configuración de storage explícita para evitar
+# problemas de herencia desde common en algunas versiones
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/index
+    cache_location: /loki/index_cache
+
+limits_config:
+  retention_period: 744h

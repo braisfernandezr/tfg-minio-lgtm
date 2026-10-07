@@ -1,0 +1,64 @@
+version: "3.4"
+
+services:
+
+  db:
+    image: grafana/tns-db:47b160f
+    command: ["-log.level=debug"]
+    ports:
+      - "8000:80"
+    environment:
+      JAEGER_ENDPOINT: "http://192.168.56.10:14268/api/traces"
+      JAEGER_TAGS: job=tns/db
+      JAEGER_SAMPLER_TYPE: const
+      JAEGER_SAMPLER_PARAM: 1
+      # Tempo padea a 128 bits los trace ID de 64 que emite Jaeger, de modo
+      # que el ID que muestra Grafana (32 hex) no coincidia con el que TNS
+      # escribe en sus logs (16 hex) y el salto traza -> logs no encontraba
+      # nada. Con esto el cliente Jaeger genera ya IDs de 128 bits y ambos
+      # coinciden literalmente.
+      JAEGER_TRACEID_128BIT: "true"
+    labels:
+      namespace: tns
+
+  app:
+    image: grafana/tns-app:47b160f
+    command: ["-log.level=debug", "http://db"]
+    depends_on:
+      - db
+    ports:
+      - "8001:80"
+    environment:
+      JAEGER_ENDPOINT: "http://192.168.56.10:14268/api/traces"
+      JAEGER_TAGS: job=tns/app
+      JAEGER_SAMPLER_TYPE: const
+      JAEGER_SAMPLER_PARAM: 1
+      # Tempo padea a 128 bits los trace ID de 64 que emite Jaeger, de modo
+      # que el ID que muestra Grafana (32 hex) no coincidia con el que TNS
+      # escribe en sus logs (16 hex) y el salto traza -> logs no encontraba
+      # nada. Con esto el cliente Jaeger genera ya IDs de 128 bits y ambos
+      # coinciden literalmente.
+      JAEGER_TRACEID_128BIT: "true"
+    labels:
+      namespace: tns
+
+  loadgen:
+    image: grafana/tns-loadgen:47b160f
+    command: ["-log.level=debug", "http://app"]
+    depends_on:
+      - app
+    ports:
+      - "8002:80"
+    environment:
+      JAEGER_ENDPOINT: "http://192.168.56.10:14268/api/traces"
+      JAEGER_TAGS: job=tns/loadgen
+      JAEGER_SAMPLER_TYPE: const
+      JAEGER_SAMPLER_PARAM: 1
+      # Tempo padea a 128 bits los trace ID de 64 que emite Jaeger, de modo
+      # que el ID que muestra Grafana (32 hex) no coincidia con el que TNS
+      # escribe en sus logs (16 hex) y el salto traza -> logs no encontraba
+      # nada. Con esto el cliente Jaeger genera ya IDs de 128 bits y ambos
+      # coinciden literalmente.
+      JAEGER_TRACEID_128BIT: "true"
+    labels:
+      namespace: tns

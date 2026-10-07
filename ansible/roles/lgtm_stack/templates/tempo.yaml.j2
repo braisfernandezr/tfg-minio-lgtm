@@ -1,0 +1,73 @@
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    # OTLP (para Alloy y apps modernas)
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+    # Jaeger (para la app TNS)
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: "0.0.0.0:14268"
+        grpc:
+          endpoint: "0.0.0.0:14250"
+
+# Habilitar búsqueda de trazas en Grafana
+query_frontend:
+  search:
+    duration_slo: 5s
+    throughput_bytes_slo: 1.073741824e+09
+
+# ========================================
+# Metrics-generator: deriva metricas RED a partir de los spans
+# y las envia a Mimir por remote_write. Sin este bloque, el
+# "Service Graph" del datasource de Tempo en Grafana
+# (jsonData.serviceMap -> mimir) queda siempre vacio, porque
+# nadie produce las series traces_service_graph_*.
+#
+# Mimir corre con multitenancy_enabled: false, asi que el push
+# no necesita cabecera X-Scope-OrgID (todo va al tenant anonimo).
+# ========================================
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+
+  storage:
+    path: /tmp/tempo/generator/wal
+    remote_write:
+      - url: http://mimir:9009/api/v1/push
+        send_exemplars: true
+
+# Los procesadores no se activan en el bloque metrics_generator
+# sino via overrides: por defecto Tempo no ejecuta ninguno, de
+# modo que definir metrics_generator sin esto no genera nada.
+#   service-graphs -> traces_service_graph_* (el grafo de servicios)
+#   span-metrics   -> traces_spanmetrics_*  (RED por span)
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]
+
+storage:
+  trace:
+    backend: s3
+
+    s3:
+      bucket: {{ tempo_bucket }}
+      endpoint: {{ minio_endpoint }}
+      access_key: {{ minio_access_key }}
+      secret_key: {{ minio_secret_key }}
+      region: {{ minio_region }}
+      insecure: true
+      forcepathstyle: true
+
+    wal:
+      path: /tmp/tempo/wal

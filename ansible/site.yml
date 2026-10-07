@@ -1,0 +1,57 @@
+---
+# ========================================
+# site.yml — orquestador basado en roles
+#
+# Punto de entrada único del aprovisionamiento Ansible del
+# proyecto. Sustituyó por completo a los 4 playbooks
+# planos originales, que ya no forman parte del proyecto.
+#
+# Uso:
+#   ansible-playbook site.yml
+#
+# También se puede ejecutar cada fase por separado con
+# --tags, ya que cada play lleva la tag del componente
+# que despliega:
+#   ansible-playbook site.yml --tags minio
+#   ansible-playbook site.yml --tags grafana_alloy
+#   ansible-playbook site.yml --tags lgtm_stack
+#
+# Orden de ejecución: Docker se instala primero en TODOS
+# los hosts porque tanto grafana_alloy como lgtm_stack lo
+# necesitan; minio no depende de Docker así que su
+# posición exacta en la secuencia es indiferente, pero se
+# deja en segundo lugar por mantener el mismo orden lógico
+# que tenía el Vagrantfile original (minio -> docker ->
+# grafana-alloy -> lgtm-stack).
+# ========================================
+
+- name: Instalar Docker en todos los hosts
+  hosts: all
+  become: true
+  tags: [docker]
+  roles:
+    - docker
+
+- name: Desplegar MinIO Open Source distribuido
+  hosts: minio
+  become: true
+  tags: [minio]
+  roles:
+    - firewall
+    - minio
+
+- name: Desplegar Grafana Alloy
+  hosts: monitoring
+  become: true
+  tags: [grafana_alloy]
+  roles:
+    - firewall
+    - grafana_alloy
+
+- name: Desplegar stack LGTM
+  hosts: minio-1
+  become: true
+  tags: [lgtm_stack]
+  roles:
+    - firewall
+    - lgtm_stack

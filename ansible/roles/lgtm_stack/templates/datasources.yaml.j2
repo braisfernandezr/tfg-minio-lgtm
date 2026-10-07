@@ -1,0 +1,76 @@
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      # Salto log -> traza: convierte el traceID que emiten los
+      # servicios de TNS en su salida (level=warn traceID=abc123 msg=...)
+      # en un enlace al datasource de Tempo. El grupo de captura (\w+)
+      # exige al menos un caracter, asi que las lineas que emiten
+      # "traceID=" vacio (peticiones sin traza) no generan enlace.
+      derivedFields:
+        - name: TraceID
+          matcherType: regex
+          matcherRegex: 'traceID=(\w+)'
+          # FIX: el "$" va duplicado. Grafana interpola variables de
+          # entorno en los ficheros de provisioning, y "${...}" sin
+          # escapar se sustituye por la cadena vacia (el enlace queda
+          # con url vacia y no lleva a ninguna parte). "$$" escapa un
+          # "$" literal, que es lo que espera el motor de plantillas.
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+        # FIX: sin "tags" Grafana usa sus etiquetas por defecto
+        # (cluster, namespace, pod, service.name...), ninguna de las
+        # cuales existe en Loki aqui — las unicas etiquetas reales son
+        # host, instance y service_name (este ultimo siempre vale
+        # "unknown_service"). El selector resultante quedaba vacio y Loki
+        # rechazaba la consulta con un parse error, de modo que el boton
+        # "Logs for this span" fallaba en lugar de devolver resultados.
+        # Con customQuery se construye la consulta explicitamente: host
+        # =~ ".+" es un matcher no vacio valido (lo exige Loki) y sirve
+        # para cualquiera de los app-monitor-*, y el filtro de linea usa
+        # el traceID del span. customQuery sustituye a filterByTraceID.
+        # El "$" duplicado por el mismo motivo que en derivedFields:
+        # sin escapar, Grafana deja la consulta como |= "" y el salto
+        # devuelve todos los logs del nodo en vez de los de la traza.
+        customQuery: true
+        query: '{host=~".+"} |= "$${__span.traceId}"'
+      lokiSearch:
+        datasourceUid: loki
+      serviceMap:
+        datasourceUid: mimir
+
+  - name: Mimir
+    type: prometheus
+    uid: mimir
+    access: proxy
+    url: http://mimir:9009/prometheus
+    isDefault: true
+    editable: true
+    jsonData:
+      # FIX: intervalo de scrape real, el que fija config.alloy.j2. Sin
+      # declararlo Grafana asume 15s, y con ese supuesto calcula
+      # $__rate_interval = max($__interval + 15s, 60s). Los dashboards
+      # que usan rate(...[$__rate_interval]) pedian ventanas de 1 minuto
+      # sobre datos que llegaban cada 60s, de modo que a menudo solo
+      # habia una muestra dentro de la ventana y rate() no devolvia
+      # nada: paneles de CPU y de red en "No data" de forma
+      # intermitente. Debe coincidir con el scrape_interval de Alloy.
+      timeInterval: "15s"
