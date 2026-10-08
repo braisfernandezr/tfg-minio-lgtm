@@ -1,4 +1,4 @@
-# TFG - Diseño y despliegue de una infraestructura de almacenamiento distribuido y observabilidad nativa de la nube mediante IaC
+# TFG - Diseño y despliegue de una infraestructura de almacenamiento distribuido y observabilidad nativa de la nube mediante IaC (9.8 M.H.)
 
 **Autor:** Brais Fernández Reyes
 **Dirección:** Roberto Rey Expósito
