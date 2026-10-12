@@ -1,7 +1,9 @@
 # TFG - Diseño y despliegue de una infraestructura de almacenamiento distribuido y observabilidad nativa de la nube mediante IaC (9.8 M.H.)
 
 **Autor:** Brais Fernández Reyes
+
 **Dirección:** Roberto Rey Expósito
+
 **Institución:** Universidade da Coruña, Facultade de Informática
 
 Trabajo de Fin de Grado: diseño y despliegue automatizado, mediante técnicas de Infrastructure as Code (Vagrant + Ansible), de un clúster de almacenamiento de objetos **MinIO** en modo distribuido junto a una pila de observabilidad nativa de la nube **LGTM** (Loki, Grafana, Tempo, Mimir) recolectada mediante **Grafana Alloy**. Incluye una aplicación de demostración (**TNS**, de Grafana Labs) que genera métricas, logs y trazas para validar todo el pipeline de extremo a extremo de forma experimental.
